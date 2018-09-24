@@ -10,6 +10,10 @@ import (
 	"sync"
 
 	"labrpc"
+	//"net"
+	"fmt"
+	//"time"
+	//"go/build"
 )
 
 // the 3 possible server status
@@ -32,6 +36,8 @@ type PBServer struct {
 	commitIndex int           // all log entries <= commitIndex are considered to have been committed.
 
 	// ... other state that you might need ...
+	optIndex int			 			// opt number
+	prepareChan chan *PrepareReply 		// prepare result channel
 }
 
 // Prepare defines the arguments for the Prepare RPC
@@ -81,7 +87,7 @@ type StartViewArgs struct {
 type StartViewReply struct {
 }
 
-// GetPrimary is an auxilary function that returns the server index of the
+// GetPrimary is an auxiliary function that returns the server index of the
 // primary server given the view number (and the total number of replica servers)
 func GetPrimary(view int, nservers int) int {
 	return view % nservers
@@ -170,10 +176,60 @@ func (srv *PBServer) Start(command interface{}) (
 
 	// Your code here
 
-	return index, view, ok
+	// advance opt number
+	srv.optIndex += 1
+	p2PrepareArgs := &PrepareArgs{
+		View: srv.currentView,
+		PrimaryCommit: srv.commitIndex,
+		Index: srv.optIndex,
+		Entry: command,
+	}
+	// send prepare msg to replica
+	quorumChan := make(chan *PrepareReply)
+	for replicaIndex := range srv.peers {
+		go func(r int) {
+			p2PrepareReply := new(PrepareReply)
+			for {
+				ok := srv.sendPrepare(r, p2PrepareArgs, p2PrepareReply)
+				if ok {
+					break
+				}
+				fmt.Printf("Send prepare msg to server=%v failure!\n", r)
+			}
+			fmt.Printf("Receive reply from server=%v\n", r)
+			quorumChan <- p2PrepareReply
+		}(replicaIndex)
+	}
+
+	// TOOD: wait reply from replica
+	go func() {
+		subQuorum := len(srv.peers) / 2 + 1
+		receiveReplyCount := 0
+		viewIncreaseFlag := false
+		for {
+			var reply *PrepareReply
+			select {
+			case reply = <- quorumChan:
+
+				if reply.Success {
+					receiveReplyCount++
+					fmt.Printf("(after)receiveReplyCount=%v\n", receiveReplyCount)
+					if receiveReplyCount >= subQuorum && !viewIncreaseFlag {
+						srv.mu.Lock()
+						srv.log = append(srv.log, command)
+						srv.commitIndex++
+						srv.mu.Unlock()
+						viewIncreaseFlag = true
+					}
+				}
+			}
+		}
+	}()
+
+	return srv.commitIndex + 1, srv.currentView, true
 }
 
-// exmple code to send an AppendEntries RPC to a server.
+// example code to send an AppendEntries RPC to a server.
 // server is the index of the target server in srv.peers[].
 // expects RPC arguments in args.
 // The RPC library fills in *reply with RPC reply, so caller should pass &reply.
@@ -196,6 +252,33 @@ func (srv *PBServer) sendPrepare(server int, args *PrepareArgs, reply *PrepareRe
 // Prepare is the RPC handler for the Prepare RPC
 func (srv *PBServer) Prepare(args *PrepareArgs, reply *PrepareReply) {
 	// Your code here
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	fmt.Printf("(slave %v) prepare msg=%v, log=%v, opt=%v, commit=%v\n", srv.me, args, srv.log, srv.optIndex, srv.commitIndex)
+	switch {
+		case args.View > srv.currentView:{
+			// need recovery
+		}
+		case args.View == srv.currentView:{
+			if args.Index > srv.optIndex + 1 {
+				reply.Success = false
+				return
+			}
+			if GetPrimary(args.View, len(srv.peers)) != srv.me {
+				srv.optIndex++
+				srv.log = append(srv.log, args.Entry)
+			}
+			if args.PrimaryCommit <= srv.optIndex {
+				srv.commitIndex = args.PrimaryCommit
+			}
+			reply.View = srv.currentView
+			reply.Success = true
+		}
+		default:{
+			reply.Success = false
+		}
+	}
 }
 
 // Recovery is the RPC handler for the Recovery RPC

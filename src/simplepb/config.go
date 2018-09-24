@@ -247,6 +247,8 @@ func (cfg *config) replicateOne(server int, cmd int, expectedServers int) (
 	t0 := time.Now()
 	for time.Since(t0).Seconds() < 10 {
 		committed := pri.IsCommitted(index)
+		//fmt.Printf("command %v commit=%v in primary.\n", index, committed)
+		//fmt.Printf("primary log=%v, opt=%v, commit=%v\n", pri.log, pri.optIndex, pri.commitIndex)
 		if committed {
 			nReplicated := 0
 			for i := 0; i < len(cfg.pbservers); i++ {
